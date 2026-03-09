@@ -568,8 +568,49 @@
   }
 
   async function uploadFileToSupabase(file, onProgress) {
-    // Check file size first
     if (file.size > MAX_FILE_SIZE_BYTES) {
+      throw new Error(`"${file.name}" is ${(file.size / 1024 / 1024).toFixed(0)}MB. Max size is ${MAX_FILE_SIZE_MB}MB. Please compress it and try again.`);
+    }
+
+    const isVideo = file.type.startsWith('video/') || file.name.toLowerCase().endsWith('.mov');
+    const ext = file.name.split('.').pop();
+    const safeName = `${currentUser.id}/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
+
+    onProgress(20, `Uploading "${file.name}"...`);
+
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${SUPABASE_URL}/storage/v1/object/${BUCKET}/${safeName}`);
+      xhr.setRequestHeader('apikey', SUPABASE_KEY);
+      xhr.setRequestHeader('Authorization', `Bearer ${accessToken}`);
+      xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+      xhr.setRequestHeader('x-upsert', 'true');
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const pct = Math.round(20 + (e.loaded / e.total) * 75);
+          onProgress(pct, `Uploading "${file.name}"... ${pct}%`);
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          onProgress(100, 'Done!');
+          resolve({
+            storagePath: safeName,
+            url: getPublicUrl(safeName),
+            type: isVideo ? 'video' : 'image',
+            name: file.name
+          });
+        } else {
+          reject(new Error(`Upload failed (${xhr.status}): ${xhr.responseText}`));
+        }
+      };
+
+      xhr.onerror = () => reject(new Error('Network error during upload.'));
+      xhr.send(file);
+    });
+  }
       throw new Error(`"${file.name}" is ${(file.size / 1024 / 1024).toFixed(0)}MB. Max size is ${MAX_FILE_SIZE_MB}MB. Please compress it and try again.`);
     }
 
