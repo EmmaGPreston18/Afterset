@@ -296,7 +296,7 @@
           <input type="file" id="mediaInput" accept="image/*,video/*" multiple onchange="handleMediaUpload(event)">
           <div class="uz-icon">📎</div>
           <p>Drop files here or <span>browse</span></p>
-          <p style="font-size:0.75rem;margin-top:0.3rem;">Large videos auto-split into chunks and compressed by Cloudinary</p>
+          <p style="font-size:0.75rem;margin-top:0.3rem;">Large videos compressed & optimized by Mux</p>
         </div>
         <div class="media-previews" id="mediaPreviews"></div>
       </div>
@@ -504,38 +504,54 @@
     c.appendChild(row);
   }
 
-  // ─── MUX UPLOAD ─────────────────────────────────────────────
-  async function uploadToMux(file) {
+  // ─── MUX TUS UPLOAD ─────────────────────────────────────────
+  // TUS protocol allows direct browser uploads to Mux
+  async function uploadToMuxTUS(file) {
     const sizeInMB = (file.size / (1024 * 1024)).toFixed(1);
-    showToast(`Uploading to Mux: "${file.name}" (${sizeInMB}MB)... This may take a minute.`);
+    showToast(`Uploading to Mux: "${file.name}" (${sizeInMB}MB)... This may take a few minutes.`);
     
     try {
-      // Step 1: Create an upload URL with Mux
-      const uploadResponse = await axios.post(
+      // Step 1: Create upload URL using TUS protocol
+      const tusResponse = await axios.post(
         'https://api.mux.com/video/v1/uploads',
-        { cors_origin: 'https://afterset-kappa.vercel.app' },
+        {
+          cors_origin: window.location.origin
+        },
         {
           auth: {
             username: MUX_TOKEN_ID,
             password: MUX_TOKEN_SECRET
+          },
+          headers: {
+            'Content-Type': 'application/json'
           }
         }
       );
       
-      const uploadUrl = uploadResponse.data.data.url;
-      const uploadId = uploadResponse.data.data.id;
+      const uploadUrl = tusResponse.data.data.url;
+      const uploadId = tusResponse.data.data.id;
       
-      // Step 2: Upload the file to the URL
-      showToast(`Uploading file... This may take a few minutes for large videos.`);
+      // Step 2: Upload file using TUS protocol
+      showToast(`Uploading file to Mux... Please wait.`);
       
-      await axios.put(uploadUrl, file, {
+      // TUS protocol: PUT request with file content
+      const response = await fetch(uploadUrl, {
+        method: 'PUT',
         headers: {
-          'Content-Type': file.type || 'application/octet-stream'
+          'Content-Type': file.type || 'application/octet-stream',
+          'Upload-Length': file.size.toString(),
+          'Upload-Offset': '0'
         },
-        timeout: 600000 // 10 minutes
+        body: file
       });
       
+      if (!response.ok) {
+        throw new Error(`Upload failed with status ${response.status}: ${response.statusText}`);
+      }
+      
       // Step 3: Complete the upload
+      showToast(`Finalizing upload...`);
+      
       const completeResponse = await axios.post(
         `https://api.mux.com/video/v1/uploads/${uploadId}/complete`,
         {},
@@ -549,37 +565,46 @@
       
       const assetId = completeResponse.data.data.asset_id;
       
-      // Step 4: Wait for the asset to be ready and get playback info
+      // Step 4: Wait for the asset to be ready
       let asset = null;
       let attempts = 0;
-      const maxAttempts = 60; // Wait up to 60 seconds
+      const maxAttempts = 120; // Wait up to 2 minutes
+      
+      showToast(`Processing video... This may take a minute.`);
       
       while (attempts < maxAttempts) {
-        const assetResponse = await axios.get(
-          `https://api.mux.com/video/v1/assets/${assetId}`,
-          {
-            auth: {
-              username: MUX_TOKEN_ID,
-              password: MUX_TOKEN_SECRET
+        try {
+          const assetResponse = await axios.get(
+            `https://api.mux.com/video/v1/assets/${assetId}`,
+            {
+              auth: {
+                username: MUX_TOKEN_ID,
+                password: MUX_TOKEN_SECRET
+              }
             }
+          );
+          
+          asset = assetResponse.data.data;
+          
+          if (asset.status === 'ready' && asset.playback_ids && asset.playback_ids.length > 0) {
+            break;
           }
-        );
-        
-        asset = assetResponse.data.data;
-        
-        if (asset.status === 'ready' && asset.playback_ids && asset.playback_ids.length > 0) {
-          break;
+          
+          attempts++;
+          const progress = Math.round((attempts / maxAttempts) * 100);
+          showToast(`Processing video... ${progress}%`);
+          
+          // Wait 1 second before checking again
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        } catch (pollErr) {
+          console.error('Error polling asset status:', pollErr);
+          attempts++;
+          await new Promise(resolve => setTimeout(resolve, 1000));
         }
-        
-        attempts++;
-        showToast(`Processing video... ${Math.round((attempts / maxAttempts) * 100)}%`);
-        
-        // Wait 1 second before checking again
-        await new Promise(resolve => setTimeout(resolve, 1000));
       }
       
       if (!asset || asset.status !== 'ready') {
-        throw new Error('Video processing timed out. Please check Mux dashboard.');
+        throw new Error('Video processing timed out. Check Mux dashboard.');
       }
       
       // Get the playback URL
@@ -595,9 +620,6 @@
       
     } catch (error) {
       console.error('Mux upload error:', error);
-      if (error.response?.data) {
-        console.error('Mux error details:', error.response.data);
-      }
       throw error;
     }
   }
@@ -618,7 +640,7 @@
       try {
         if (isVideo) {
           // Upload video to Mux
-          const muxData = await uploadToMux(f);
+          const muxData = await uploadToMuxTUS(f);
           pendingMedia.push({
             file: { name: f.name },
             url: `https://stream.mux.com/${muxData.playbackId}.m3u8`,
