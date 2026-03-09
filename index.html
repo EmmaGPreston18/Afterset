@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Afterset</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/axios/1.6.2/axios.min.js"></script>
+<script src="https://upload-widget.cloudinary.com/latest/index.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0a; color: #fff; min-height: 100vh; }
@@ -99,17 +100,17 @@
   .add-song-btn:hover { border-color: #a855f7; color: #a855f7; }
 
   .upload-zone { border: 2px dashed #2a2a2a; border-radius: 10px; padding: 1.5rem; text-align: center; cursor: pointer; transition: border-color 0.2s; position: relative; }
-  .upload-zone:hover, .upload-zone.dragover { border-color: #a855f7; }
-  .upload-zone input[type="file"] { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
+  .upload-zone:hover { border-color: #a855f7; }
   .upload-zone .uz-icon { font-size: 1.8rem; margin-bottom: 0.5rem; }
   .upload-zone p { font-size: 0.85rem; color: #666; }
   .upload-zone p span { color: #a855f7; }
+  .upload-btn { background: #a855f7; color: #fff; border: none; padding: 0.6rem 1.2rem; border-radius: 8px; cursor: pointer; font-size: 0.9rem; font-weight: 600; width: 100%; }
+  .upload-btn:hover { background: #9333ea; }
   .media-previews { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.5rem; margin-top: 0.8rem; }
   .media-thumb { position: relative; aspect-ratio: 1; border-radius: 6px; overflow: hidden; background: #1a1a1a; }
   .media-thumb img, .media-thumb video { width: 100%; height: 100%; object-fit: cover; }
   .media-thumb .rm-media { position: absolute; top: 3px; right: 3px; background: rgba(0,0,0,0.7); border: none; color: #fff; border-radius: 50%; width: 20px; height: 20px; font-size: 0.7rem; cursor: pointer; display: flex; align-items: center; justify-content: center; }
   .video-badge { position: absolute; bottom: 3px; left: 3px; background: rgba(0,0,0,0.7); color: #fff; font-size: 0.6rem; padding: 1px 4px; border-radius: 3px; }
-  .compression-status { font-size: 0.75rem; color: #888; margin-top: 0.3rem; }
 
   .submit-btn { background: #a855f7; color: #fff; border: none; padding: 0.8rem; border-radius: 8px; font-size: 0.95rem; font-weight: 600; cursor: pointer; width: 100%; margin-top: 0.5rem; }
   .submit-btn:hover { background: #9333ea; }
@@ -292,11 +293,11 @@
       </div>
       <div>
         <label>Photos & Videos</label>
-        <div class="upload-zone" id="uploadZone">
-          <input type="file" id="mediaInput" accept="image/*,video/*" multiple onchange="handleMediaUpload(event)">
+        <div class="upload-zone">
           <div class="uz-icon">📎</div>
           <p>Drop files here or <span>browse</span></p>
-          <p style="font-size:0.75rem;margin-top:0.3rem;">Images & videos supported (videos auto-compress)</p>
+          <p style="font-size:0.75rem;margin-top:0.3rem;">Images & videos supported (auto-compressed by Cloudinary)</p>
+          <button class="upload-btn" id="uploadBtn" onclick="openCloudinaryWidget()">Choose Files</button>
         </div>
         <div class="media-previews" id="mediaPreviews"></div>
       </div>
@@ -317,7 +318,7 @@
   const SUPABASE_URL = 'https://kbsyypjxawbweqjbkoop.supabase.co';
   const SUPABASE_KEY = 'sb_publishable_QC1sjJOYPzmUGowuP-AhOw_yzOIQwNm';
   const BUCKET = 'show-media';
-  const MAX_VIDEO_SIZE = 50 * 1024 * 1024; // 50 MB
+  const CLOUDINARY_CLOUD = 'dme1hasa1';
 
   let currentUser = null;
   let accessToken = null;
@@ -341,17 +342,7 @@
     }
   });
 
-  const storageUpload = (path, file) => axios.post(
-    `${SUPABASE_URL}/storage/v1/object/${BUCKET}/${path}`, file, {
-    headers: {
-      'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': file.type,
-      'x-upsert': 'true'
-    }
-  });
-
-  const mediaUrl = path => `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${path}`;
+  const mediaUrl = path => `https://res.cloudinary.com/${CLOUDINARY_CLOUD}/image/upload/${path}`;
 
   function saveSession(session) {
     accessToken = session.access_token;
@@ -509,107 +500,52 @@
     c.appendChild(row);
   }
 
-  // ─── VIDEO COMPRESSION ──────────────────────────────────────
-  async function compressVideo(file) {
-    return new Promise((resolve, reject) => {
-      const video = document.createElement('video');
-      video.src = URL.createObjectURL(file);
-      video.onloadedmetadata = () => {
-        const canvas = document.createElement('canvas');
-        canvas.width = video.videoWidth * 0.5; // Reduce to 50% size
-        canvas.height = video.videoHeight * 0.5;
-        const ctx = canvas.getContext('2d');
-        
-        const stream = canvas.captureStream(30); // 30 FPS
-        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        const mediaStreamAudioSource = audioContext.createMediaElementAudioSource(video);
-        const audioDestination = audioContext.createMediaStreamDestination();
-        mediaStreamAudioSource.connect(audioDestination);
-        
-        const combinedStream = new MediaStream([
-          ...stream.getVideoTracks(),
-          ...audioDestination.stream.getAudioTracks()
-        ]);
-        
-        const mediaRecorder = new MediaRecorder(combinedStream, {
-          videoBitsPerSecond: 1000000 // 1 Mbps for quality/size balance
-        });
-        
-        const chunks = [];
-        mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
-        mediaRecorder.onstop = () => {
-          const compressedBlob = new Blob(chunks, { type: 'video/mp4' });
-          resolve(new File([compressedBlob], file.name, { type: 'video/mp4' }));
-        };
-        
-        mediaRecorder.start();
-        
-        // Draw video frames
-        let frameCount = 0;
-        const totalFrames = Math.ceil(video.duration * 30);
-        
-        function drawFrame() {
-          if (frameCount < totalFrames) {
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            video.currentTime = frameCount / 30;
-            frameCount++;
-            requestAnimationFrame(drawFrame);
-          } else {
-            mediaRecorder.stop();
-          }
+  // ─── CLOUDINARY UPLOAD ──────────────────────────────────────
+  function openCloudinaryWidget() {
+    cloudinary.openUploadWidget(
+      {
+        cloudName: CLOUDINARY_CLOUD,
+        uploadPreset: 'afterset_unsigned',
+        multiple: true,
+        resourceType: 'auto',
+        maxFileSize: 500000000, // 500 MB
+        clientAllowedFormats: ['jpg', 'jpeg', 'png', 'gif', 'mp4', 'mov', 'webm', 'avi'],
+      },
+      (error, result) => {
+        if (error) {
+          showToast('Upload cancelled or failed', true);
+          return;
         }
-        
-        video.play();
-        drawFrame();
-      };
-      video.onerror = reject;
-    });
+        if (result && result.event === 'success') {
+          const file = result.info;
+          const type = file.resource_type === 'video' ? 'video' : 'image';
+          pendingMedia.push({
+            file: { name: file.original_filename },
+            url: file.secure_url,
+            type: type,
+            cloudinaryId: file.public_id
+          });
+          renderPreviews();
+          showToast(`"${file.original_filename}" uploaded!`);
+        }
+      }
+    );
   }
 
-  // ─── MEDIA ──────────────────────────────────────────────────
-  const uploadZone = document.getElementById('uploadZone');
-  uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('dragover'); });
-  uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
-  uploadZone.addEventListener('drop', e => { e.preventDefault(); uploadZone.classList.remove('dragover'); handleFiles([...e.dataTransfer.files]); });
-  function handleMediaUpload(e) { handleFiles([...e.target.files]); }
-  
-  async function handleFiles(files) {
-    for (const f of files) {
-      if (!f.type.startsWith('image/') && !f.type.startsWith('video/') && !f.name.toLowerCase().endsWith('.mov')) continue;
-      
-      const isVideo = f.type.startsWith('video/') || f.name.toLowerCase().endsWith('.mov');
-      
-      if (isVideo && f.size > MAX_VIDEO_SIZE) {
-        showToast(`Compressing video "${f.name}"...`, false);
-        try {
-          const compressed = await compressVideo(f);
-          pendingMedia.push({ file: compressed, url: URL.createObjectURL(compressed), type: 'video', original: f.name });
-          showToast(`"${f.name}" compressed successfully!`, false);
-        } catch (err) {
-          showToast(`Failed to compress "${f.name}". Try a shorter video.`, true);
-        }
-      } else {
-        pendingMedia.push({ file: f, url: URL.createObjectURL(f), type: isVideo ? 'video' : 'image', original: f.name });
-      }
-    }
-    renderPreviews();
-  }
-  
   function renderPreviews() {
     const c = document.getElementById('mediaPreviews');
     c.innerHTML = '';
     pendingMedia.forEach((m, i) => {
       const div = document.createElement('div');
       div.className = 'media-thumb';
-      const sizeInfo = m.file.size > 1024 * 1024 ? (m.file.size / (1024 * 1024)).toFixed(1) + 'MB' : (m.file.size / 1024).toFixed(0) + 'KB';
       div.innerHTML = (m.type === 'video'
         ? `<video src="${m.url}" muted playsinline></video><span class="video-badge">▶ video</span>`
         : `<img src="${m.url}" alt="">`)
-        + `<button class="rm-media" onclick="removeMedia(${i})">×</button>`
-        + `<div class="compression-status">${sizeInfo}</div>`;
+        + `<button class="rm-media" onclick="removeMedia(${i})">×</button>`;
       c.appendChild(div);
     });
   }
+
   function removeMedia(i) { pendingMedia.splice(i, 1); renderPreviews(); }
 
   // ─── MODAL ──────────────────────────────────────────────────
@@ -620,7 +556,6 @@
     document.getElementById('f-date').value = '';
     document.getElementById('setlistContainer').innerHTML = '';
     document.getElementById('mediaPreviews').innerHTML = '';
-    document.getElementById('mediaInput').value = '';
     pendingMedia = []; currentRating = 0; highlightStars(0);
   }
 
@@ -649,10 +584,7 @@
       const show = data[0];
       const uploadedPaths = [];
       for (const m of pendingMedia) {
-        const ext = m.file.type === 'video/quicktime' || m.file.type === 'video/mp4' ? 'mp4' : m.file.name.split('.').pop();
-        const path = `${currentUser.id}/${show.id}/${Date.now()}.${ext}`;
-        await storageUpload(path, m.file);
-        uploadedPaths.push({ path, type: m.type });
+        uploadedPaths.push({ path: m.cloudinaryId, type: m.type, url: m.url });
       }
       if (uploadedPaths.length) {
         await api(`shows?id=eq.${show.id}`, { method: 'PATCH', data: { media: uploadedPaths } });
@@ -707,7 +639,7 @@
       const first = media[0];
       let thumb = `<div class="card-thumb">🎤</div>`;
       if (first) {
-        const url = mediaUrl(first.path);
+        const url = first.url || mediaUrl(first.path);
         thumb = first.type === 'video'
           ? `<div class="card-thumb"><video src="${url}" muted></video></div>`
           : `<div class="card-thumb"><img src="${url}" alt=""></div>`;
@@ -740,7 +672,7 @@
       <p class="section-title">Photos & Videos (${media.length})</p>
       <div class="media-grid">
         ${media.map((m, i) => {
-          const url = mediaUrl(m.path);
+          const url = m.url || mediaUrl(m.path);
           return m.type === 'video'
             ? `<div class="media-item" onclick="openLightbox('${id}',${i})"><video src="${url}" muted></video><div class="play-icon">▶</div></div>`
             : `<div class="media-item" onclick="openLightbox('${id}',${i})"><img src="${url}" alt=""></div>`;
@@ -787,7 +719,7 @@
   function openLightbox(showId, idx) {
     const s = shows.find(x => x.id === showId);
     const m = s.media[idx];
-    const url = mediaUrl(m.path);
+    const url = m.url || mediaUrl(m.path);
     document.getElementById('lightboxContent').innerHTML = m.type === 'video'
       ? `<video src="${url}" controls autoplay style="max-width:90vw;max-height:90vh;border-radius:8px;"></video>`
       : `<img src="${url}" alt="" style="max-width:90vw;max-height:90vh;border-radius:8px;">`;
