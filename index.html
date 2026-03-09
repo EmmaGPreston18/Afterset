@@ -498,6 +498,11 @@
 
   // ─── CLOUDINARY UPLOAD ──────────────────────────────────────
   function openCloudinaryWidget() {
+    if (typeof cloudinary === 'undefined') {
+      showToast('Cloudinary is still loading. Please try again in a moment.', true);
+      return;
+    }
+    
     cloudinary.openUploadWidget(
       {
         cloudName: CLOUDINARY_CLOUD,
@@ -509,6 +514,7 @@
       },
       (error, result) => {
         if (error) {
+          console.error('Cloudinary error:', error);
           showToast('Upload cancelled or failed', true);
           return;
         }
