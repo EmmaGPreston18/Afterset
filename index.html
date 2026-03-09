@@ -330,7 +330,7 @@
   let accessToken = null;
   let shows = [];
   let currentRating = 0;
-  let pendingMedia = []; // { url, storagePath, type, name }
+  let pendingMedia = [];
   let isUploading = false;
 
   // ─── AUTH HELPERS ───────────────────────────────────────────
@@ -377,6 +377,38 @@
     return false;
   }
 
+  // ─── SESSION REFRESH ────────────────────────────────────────
+  // Automatically gets a new login token every 45 minutes so you
+  // are never unexpectedly logged out while using the app.
+  async function refreshSession() {
+    try {
+      const s = JSON.parse(localStorage.getItem('sl_session'));
+      if (!s?.refresh_token) return false;
+      const { data } = await authApi('token?grant_type=refresh_token', {
+        refresh_token: s.refresh_token
+      });
+      if (data?.access_token) {
+        saveSession(data);
+        return true;
+      }
+    } catch {}
+    return false;
+  }
+
+  function startSessionRefresh() {
+    // Refresh every 45 minutes (Supabase tokens last 60 minutes)
+    setInterval(async () => {
+      const ok = await refreshSession();
+      if (!ok) {
+        showToast('Session expired. Please sign in again.', true);
+        clearSession();
+        document.getElementById('appShell').classList.remove('active');
+        document.getElementById('authView').style.display = 'flex';
+        switchTab('signin');
+      }
+    }, 45 * 60 * 1000);
+  }
+
   // ─── AUTH UI ────────────────────────────────────────────────
   function switchTab(tab) {
     clearAuthMessages();
@@ -411,6 +443,7 @@
       const { data } = await authApi('token?grant_type=password', { email, password: pw });
       saveSession(data);
       enterApp();
+      startSessionRefresh();
     } catch (err) {
       showAuthError(err.response?.data?.error_description || 'Invalid email or password.');
     } finally { btn.disabled = false; btn.textContent = 'Sign In'; }
@@ -427,7 +460,7 @@
     btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Creating account...';
     try {
       const { data } = await authApi('signup', { email, password: pw });
-      if (data.session) { saveSession(data.session); enterApp(); }
+      if (data.session) { saveSession(data.session); enterApp(); startSessionRefresh(); }
       else showAuthSuccess('Account created! You can now sign in.');
     } catch (err) {
       showAuthError(err.response?.data?.msg || 'Could not create account.');
@@ -457,7 +490,7 @@
       document.getElementById('resetSuccess').textContent = 'Password updated! Redirecting...';
       document.getElementById('resetSuccess').style.display = 'block';
       document.getElementById('resetError').style.display = 'none';
-      setTimeout(() => { document.getElementById('resetView').classList.remove('active'); enterApp(); }, 1500);
+      setTimeout(() => { document.getElementById('resetView').classList.remove('active'); enterApp(); startSessionRefresh(); }, 1500);
     } catch {
       document.getElementById('resetError').textContent = 'Error updating password.';
       document.getElementById('resetError').style.display = 'block';
@@ -514,6 +547,36 @@
     c.appendChild(row);
   }
 
+  // ─── THUMBNAIL CAPTURE ──────────────────────────────────────
+  // Captures a still frame from a video file and returns it as a JPEG blob.
+  async function captureVideoThumbnail(file) {
+    return new Promise((resolve) => {
+      const video = document.createElement('video');
+      video.muted = true;
+      video.playsInline = true;
+      video.src = URL.createObjectURL(file);
+
+      video.onloadeddata = () => {
+        // Seek to 1 second in (or 10% of duration), whichever is smaller
+        video.currentTime = Math.min(1, video.duration * 0.1);
+      };
+
+      video.onseeked = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 640;
+        canvas.height = Math.round(640 * (video.videoHeight / video.videoWidth));
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        URL.revokeObjectURL(video.src);
+        canvas.toBlob(blob => resolve(blob), 'image/jpeg', 0.8);
+      };
+
+      // If seeking fails, resolve with null (no thumbnail)
+      video.onerror = () => { URL.revokeObjectURL(video.src); resolve(null); };
+      setTimeout(() => resolve(null), 8000); // 8s timeout fallback
+    });
+  }
+
   // ─── UPLOAD TO SUPABASE STORAGE ─────────────────────────────
   // Uploads files directly — no conversion. MOV files work natively in Safari.
   async function uploadFileToSupabase(file, onProgress) {
@@ -524,6 +587,27 @@
     const isVideo = file.type.startsWith('video/') || file.name.toLowerCase().endsWith('.mov');
     const ext = file.name.split('.').pop();
     const safeName = `${currentUser.id}/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
+
+    // For videos, capture a thumbnail first
+    let thumbnailUrl = null;
+    if (isVideo) {
+      onProgress(5, `Capturing thumbnail...`);
+      const thumbBlob = await captureVideoThumbnail(file);
+      if (thumbBlob) {
+        const thumbName = `${currentUser.id}/thumb_${Date.now()}.jpg`;
+        thumbnailUrl = await new Promise((res) => {
+          const xhr2 = new XMLHttpRequest();
+          xhr2.open('POST', `${SUPABASE_URL}/storage/v1/object/${BUCKET}/${thumbName}`);
+          xhr2.setRequestHeader('apikey', SUPABASE_KEY);
+          xhr2.setRequestHeader('Authorization', `Bearer ${accessToken}`);
+          xhr2.setRequestHeader('Content-Type', 'image/jpeg');
+          xhr2.setRequestHeader('x-upsert', 'true');
+          xhr2.onload = () => xhr2.status < 300 ? res(getPublicUrl(thumbName)) : res(null);
+          xhr2.onerror = () => res(null);
+          xhr2.send(thumbBlob);
+        });
+      }
+    }
 
     onProgress(20, `Uploading "${file.name}"...`);
 
@@ -548,6 +632,7 @@
           resolve({
             storagePath: safeName,
             url: getPublicUrl(safeName),
+            thumbnailUrl,
             type: isVideo ? 'video' : 'image',
             name: file.name
           });
@@ -573,7 +658,6 @@
 
   function handleMediaSelect(e) {
     processFiles([...e.target.files]);
-    // Reset input so same file can be re-selected if removed
     e.target.value = '';
   }
 
@@ -679,6 +763,7 @@
       const media = pendingMedia.map(m => ({
         type: m.type,
         url: m.url,
+        thumbnailUrl: m.thumbnailUrl || null,
         storagePath: m.storagePath,
         name: m.name
       }));
@@ -746,9 +831,12 @@
       const first = media[0];
       let thumb = `<div class="card-thumb">🎤</div>`;
       if (first) {
-        thumb = `<div class="card-thumb">${first.type === 'video'
-          ? `<video src="${first.url}" muted playsinline preload="metadata"></video>`
-          : `<img src="${first.url}" alt="">`}</div>`;
+        if (first.type === 'video') {
+          const src = first.thumbnailUrl || first.url;
+          thumb = `<div class="card-thumb"><img src="${src}" alt=""></div>`;
+        } else {
+          thumb = `<div class="card-thumb"><img src="${first.url}" alt=""></div>`;
+        }
       }
       const stars = s.rating ? '★'.repeat(s.rating) + '☆'.repeat(5 - s.rating) : '';
       const card = document.createElement('div');
@@ -779,7 +867,7 @@
       <div class="media-grid">
         ${media.map((m, i) => m.type === 'video'
           ? `<div class="media-item" onclick="openLightbox('${id}',${i})">
-               <video src="${m.url}" muted playsinline preload="metadata"></video>
+               <img src="${m.thumbnailUrl || m.url}" alt="">
                <div class="play-icon">▶</div>
              </div>`
           : `<div class="media-item" onclick="openLightbox('${id}',${i})">
@@ -848,35 +936,6 @@
     if (!d) return '';
     const [y, m, day] = d.split('-');
     return new Date(y, m - 1, day).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
-  }
-
-  // ─── SESSION REFRESH ────────────────────────────────────────
-  async function refreshSession() {
-    try {
-      const s = JSON.parse(localStorage.getItem('sl_session'));
-      if (!s?.refresh_token) return false;
-      const { data } = await authApi('token?grant_type=refresh_token', {
-        refresh_token: s.refresh_token
-      });
-      if (data?.access_token) {
-        saveSession(data);
-        return true;
-      }
-    } catch {}
-    return false;
-  }
-
-  function startSessionRefresh() {
-    // Refresh every 45 minutes (token lasts 60 min)
-    setInterval(async () => {
-      const ok = await refreshSession();
-      if (!ok) {
-        showToast('Session expired. Please sign in again.', true);
-        clearSession();
-        document.getElementById('appShell').classList.remove('active');
-        document.getElementById('authView').style.display = 'flex';
-      }
-    }, 45 * 60 * 1000);
   }
 
   // ─── INIT ───────────────────────────────────────────────────
