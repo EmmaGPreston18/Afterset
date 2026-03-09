@@ -356,7 +356,11 @@
   function saveSession(session) {
     accessToken = session.access_token;
     currentUser = session.user;
-    localStorage.setItem('sl_session', JSON.stringify({ access_token: session.access_token, user: session.user }));
+    localStorage.setItem('sl_session', JSON.stringify({
+      access_token: session.access_token,
+      refresh_token: session.refresh_token,
+      user: session.user
+    }));
   }
 
   function clearSession() {
@@ -846,9 +850,38 @@
     return new Date(y, m - 1, day).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
   }
 
+  // ─── SESSION REFRESH ────────────────────────────────────────
+  async function refreshSession() {
+    try {
+      const s = JSON.parse(localStorage.getItem('sl_session'));
+      if (!s?.refresh_token) return false;
+      const { data } = await authApi('token?grant_type=refresh_token', {
+        refresh_token: s.refresh_token
+      });
+      if (data?.access_token) {
+        saveSession(data);
+        return true;
+      }
+    } catch {}
+    return false;
+  }
+
+  function startSessionRefresh() {
+    // Refresh every 45 minutes (token lasts 60 min)
+    setInterval(async () => {
+      const ok = await refreshSession();
+      if (!ok) {
+        showToast('Session expired. Please sign in again.', true);
+        clearSession();
+        document.getElementById('appShell').classList.remove('active');
+        document.getElementById('authView').style.display = 'flex';
+      }
+    }, 45 * 60 * 1000);
+  }
+
   // ─── INIT ───────────────────────────────────────────────────
   if (!checkResetLink()) {
-    if (restoreSession()) enterApp();
+    if (restoreSession()) { enterApp(); startSessionRefresh(); }
     else document.getElementById('authView').style.display = 'flex';
   }
 </script>
