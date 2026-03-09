@@ -881,7 +881,8 @@
       <div class="detail-meta">${s.venue || 'Unknown venue'}${s.date ? ' · ' + formatDate(s.date) : ''}</div>
       <div class="detail-rating">${stars}</div>
       ${setlistHTML}${notesHTML}${mediaHTML}
-      <button class="delete-show-btn" onclick="deleteShow('${s.id}')">🗑 Delete show</button>`;
+      <button class="delete-show-btn" id="deleteBtn">🗑 Delete show</button>`;
+    document.getElementById('deleteBtn').addEventListener('click', () => deleteShow(s.id));
     document.getElementById('homeView').classList.remove('active');
     document.getElementById('detailView').classList.add('active');
   }
