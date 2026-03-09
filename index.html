@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Afterset</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/axios/1.6.2/axios.min.js"></script>
-<script src="https://upload-widget.cloudinary.com/latest/index.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0a0a0a; color: #fff; min-height: 100vh; }
@@ -293,8 +292,12 @@
       </div>
       <div>
         <label>Photos & Videos</label>
-        <button class="upload-btn" id="uploadBtn" onclick="openCloudinaryWidget()">📎 Choose Files to Upload</button>
-        <p style="font-size:0.75rem;margin-top:0.5rem;color:#666;">Images & videos auto-compressed by Cloudinary</p>
+        <div class="upload-zone" id="uploadZone">
+          <input type="file" id="mediaInput" accept="image/*,video/*" multiple onchange="handleMediaUpload(event)">
+          <div class="uz-icon">📎</div>
+          <p>Drop files here or <span>browse</span></p>
+          <p style="font-size:0.75rem;margin-top:0.3rem;">Large videos auto-split into chunks and compressed by Cloudinary</p>
+        </div>
         <div class="media-previews" id="mediaPreviews"></div>
       </div>
       <button class="submit-btn" id="submitBtn" onclick="saveShow()">Save Show</button>
@@ -496,42 +499,85 @@
     c.appendChild(row);
   }
 
-  // ─── CLOUDINARY UPLOAD ──────────────────────────────────────
-  function openCloudinaryWidget() {
-    if (typeof cloudinary === 'undefined') {
-      showToast('Cloudinary is loading. Please try again in a moment.', true);
-      return;
-    }
+  // ─── CLOUDINARY CHUNKED UPLOAD ──────────────────────────────
+  const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
+  
+  async function uploadChunkedToCloudinary(file) {
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
     
-    cloudinary.openUploadWidget(
-      {
-        cloudName: CLOUDINARY_CLOUD,
-        uploadPreset: 'afterset_unsigned',
-        multiple: true,
-        resourceType: 'auto',
-        maxFileSize: 1000000000, // 1 GB
-        clientAllowedFormats: ['jpg', 'jpeg', 'png', 'gif', 'mp4', 'mov', 'webm', 'avi', 'mkv'],
-      },
-      (error, result) => {
-        if (error) {
-          console.error('Cloudinary error:', error);
-          showToast('Upload cancelled or failed', true);
-          return;
+    try {
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, file.size);
+        const chunk = file.slice(start, end);
+        
+        const formData = new FormData();
+        formData.append('file', chunk);
+        formData.append('upload_preset', 'afterset_unsigned');
+        
+        // For chunked uploads, add chunk info
+        if (totalChunks > 1) {
+          formData.append('chunk', i);
+          formData.append('chunks', totalChunks);
         }
-        if (result && result.event === 'success') {
-          const file = result.info;
-          const type = file.resource_type === 'video' ? 'video' : 'image';
-          pendingMedia.push({
-            file: { name: file.original_filename },
-            url: file.secure_url,
-            type: type,
-            cloudinaryId: file.public_id
-          });
-          renderPreviews();
-          showToast(`"${file.original_filename}" uploaded!`);
+        
+        const progress = Math.round(((i + 1) / totalChunks) * 100);
+        showToast(`Uploading "${file.name}"... ${progress}%`);
+        
+        try {
+          const response = await axios.post(
+            `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD}/auto/upload`,
+            formData,
+            { timeout: 300000 } // 5 min timeout per chunk
+          );
+          
+          if (i === totalChunks - 1) {
+            // Last chunk - return the upload info
+            return response.data;
+          }
+        } catch (chunkErr) {
+          console.error(`Chunk ${i + 1} failed:`, chunkErr);
+          throw chunkErr;
         }
       }
-    );
+    } catch (error) {
+      console.error('Cloudinary chunked upload error:', error);
+      throw error;
+    }
+  }
+
+  // ─── MEDIA ──────────────────────────────────────────────────
+  const uploadZone = document.getElementById('uploadZone');
+  uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('dragover'); });
+  uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
+  uploadZone.addEventListener('drop', e => { e.preventDefault(); uploadZone.classList.remove('dragover'); handleFiles([...e.dataTransfer.files]); });
+  function handleMediaUpload(e) { handleFiles([...e.target.files]); }
+  
+  async function handleFiles(files) {
+    for (const f of files) {
+      if (!f.type.startsWith('image/') && !f.type.startsWith('video/') && !f.name.toLowerCase().endsWith('.mov')) continue;
+      
+      const sizeInMB = (f.size / (1024 * 1024)).toFixed(1);
+      showToast(`Starting upload of "${f.name}" (${sizeInMB}MB)...`);
+      
+      try {
+        const cloudinaryData = await uploadChunkedToCloudinary(f);
+        const type = cloudinaryData.resource_type === 'video' ? 'video' : 'image';
+        
+        pendingMedia.push({
+          file: { name: f.name },
+          url: cloudinaryData.secure_url,
+          type: type,
+          cloudinaryId: cloudinaryData.public_id
+        });
+        
+        renderPreviews();
+        showToast(`"${f.name}" uploaded successfully! 🎉`);
+      } catch (err) {
+        console.error('Upload failed:', err);
+        showToast(`Failed to upload "${f.name}". Try again or use a smaller file.`, true);
+      }
+    }
   }
 
   function renderPreviews() {
