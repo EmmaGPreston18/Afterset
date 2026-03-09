@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>setlog</title>
+<title>Afterset</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/axios/1.6.2/axios.min.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -109,6 +109,7 @@
   .media-thumb img, .media-thumb video { width: 100%; height: 100%; object-fit: cover; }
   .media-thumb .rm-media { position: absolute; top: 3px; right: 3px; background: rgba(0,0,0,0.7); border: none; color: #fff; border-radius: 50%; width: 20px; height: 20px; font-size: 0.7rem; cursor: pointer; display: flex; align-items: center; justify-content: center; }
   .video-badge { position: absolute; bottom: 3px; left: 3px; background: rgba(0,0,0,0.7); color: #fff; font-size: 0.6rem; padding: 1px 4px; border-radius: 3px; }
+  .compression-status { font-size: 0.75rem; color: #888; margin-top: 0.3rem; }
 
   .submit-btn { background: #a855f7; color: #fff; border: none; padding: 0.8rem; border-radius: 8px; font-size: 0.95rem; font-weight: 600; cursor: pointer; width: 100%; margin-top: 0.5rem; }
   .submit-btn:hover { background: #9333ea; }
@@ -151,7 +152,7 @@
 <!-- AUTH VIEW -->
 <div id="authView">
   <div class="auth-card">
-    <div class="auth-logo">set<span>log</span></div>
+    <div class="auth-logo">After<span>set</span></div>
     <div class="auth-tagline">Your personal concert archive</div>
     <div class="auth-tabs">
       <button class="auth-tab active" id="signinTab" onclick="switchTab('signin')">Sign In</button>
@@ -196,7 +197,7 @@
 <!-- RESET PASSWORD VIEW -->
 <div id="resetView">
   <div class="auth-card">
-    <div class="auth-logo">set<span>log</span></div>
+    <div class="auth-logo">After<span>set</span></div>
     <div class="auth-tagline" style="margin-bottom:1.5rem;">Set a new password</div>
     <div id="resetError" class="auth-error"></div>
     <div id="resetSuccess" class="auth-success"></div>
@@ -217,7 +218,7 @@
 <!-- APP SHELL -->
 <div id="appShell">
   <nav>
-    <div class="logo">set<span>log</span></div>
+    <div class="logo">After<span>set</span></div>
     <div class="nav-right">
       <button class="nav-btn" onclick="openModal()">+ Log Show</button>
       <div class="profile-wrap">
@@ -295,7 +296,7 @@
           <input type="file" id="mediaInput" accept="image/*,video/*" multiple onchange="handleMediaUpload(event)">
           <div class="uz-icon">📎</div>
           <p>Drop files here or <span>browse</span></p>
-          <p style="font-size:0.75rem;margin-top:0.3rem;">Images & videos supported</p>
+          <p style="font-size:0.75rem;margin-top:0.3rem;">Images & videos supported (videos auto-compress)</p>
         </div>
         <div class="media-previews" id="mediaPreviews"></div>
       </div>
@@ -316,6 +317,7 @@
   const SUPABASE_URL = 'https://kbsyypjxawbweqjbkoop.supabase.co';
   const SUPABASE_KEY = 'sb_publishable_QC1sjJOYPzmUGowuP-AhOw_yzOIQwNm';
   const BUCKET = 'show-media';
+  const MAX_VIDEO_SIZE = 50 * 1024 * 1024; // 50 MB
 
   let currentUser = null;
   let accessToken = null;
@@ -422,7 +424,7 @@
     try {
       const { data } = await authApi('signup', { email, password: pw });
       if (data.session) { saveSession(data.session); enterApp(); }
-      else showAuthSuccess('Check your email to confirm your account, then sign in.');
+      else showAuthSuccess('Account created! You can now sign in.');
     } catch (err) {
       showAuthError(err.response?.data?.msg || 'Could not create account.');
     } finally { btn.disabled = false; btn.textContent = 'Create Account'; }
@@ -507,29 +509,104 @@
     c.appendChild(row);
   }
 
+  // ─── VIDEO COMPRESSION ──────────────────────────────────────
+  async function compressVideo(file) {
+    return new Promise((resolve, reject) => {
+      const video = document.createElement('video');
+      video.src = URL.createObjectURL(file);
+      video.onloadedmetadata = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = video.videoWidth * 0.5; // Reduce to 50% size
+        canvas.height = video.videoHeight * 0.5;
+        const ctx = canvas.getContext('2d');
+        
+        const stream = canvas.captureStream(30); // 30 FPS
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const mediaStreamAudioSource = audioContext.createMediaElementAudioSource(video);
+        const audioDestination = audioContext.createMediaStreamDestination();
+        mediaStreamAudioSource.connect(audioDestination);
+        
+        const combinedStream = new MediaStream([
+          ...stream.getVideoTracks(),
+          ...audioDestination.stream.getAudioTracks()
+        ]);
+        
+        const mediaRecorder = new MediaRecorder(combinedStream, {
+          videoBitsPerSecond: 1000000 // 1 Mbps for quality/size balance
+        });
+        
+        const chunks = [];
+        mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
+        mediaRecorder.onstop = () => {
+          const compressedBlob = new Blob(chunks, { type: 'video/mp4' });
+          resolve(new File([compressedBlob], file.name, { type: 'video/mp4' }));
+        };
+        
+        mediaRecorder.start();
+        
+        // Draw video frames
+        let frameCount = 0;
+        const totalFrames = Math.ceil(video.duration * 30);
+        
+        function drawFrame() {
+          if (frameCount < totalFrames) {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            video.currentTime = frameCount / 30;
+            frameCount++;
+            requestAnimationFrame(drawFrame);
+          } else {
+            mediaRecorder.stop();
+          }
+        }
+        
+        video.play();
+        drawFrame();
+      };
+      video.onerror = reject;
+    });
+  }
+
   // ─── MEDIA ──────────────────────────────────────────────────
   const uploadZone = document.getElementById('uploadZone');
   uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('dragover'); });
   uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
   uploadZone.addEventListener('drop', e => { e.preventDefault(); uploadZone.classList.remove('dragover'); handleFiles([...e.dataTransfer.files]); });
   function handleMediaUpload(e) { handleFiles([...e.target.files]); }
-  function handleFiles(files) {
-    files.forEach(f => {
-      if (!f.type.startsWith('image/') && !f.type.startsWith('video/') && !f.name.toLowerCase().endsWith('.mov')) return;
-      pendingMedia.push({ file: f, url: URL.createObjectURL(f), type: f.type.startsWith('video/') ? 'video' : 'image' });
-    });
+  
+  async function handleFiles(files) {
+    for (const f of files) {
+      if (!f.type.startsWith('image/') && !f.type.startsWith('video/') && !f.name.toLowerCase().endsWith('.mov')) continue;
+      
+      const isVideo = f.type.startsWith('video/') || f.name.toLowerCase().endsWith('.mov');
+      
+      if (isVideo && f.size > MAX_VIDEO_SIZE) {
+        showToast(`Compressing video "${f.name}"...`, false);
+        try {
+          const compressed = await compressVideo(f);
+          pendingMedia.push({ file: compressed, url: URL.createObjectURL(compressed), type: 'video', original: f.name });
+          showToast(`"${f.name}" compressed successfully!`, false);
+        } catch (err) {
+          showToast(`Failed to compress "${f.name}". Try a shorter video.`, true);
+        }
+      } else {
+        pendingMedia.push({ file: f, url: URL.createObjectURL(f), type: isVideo ? 'video' : 'image', original: f.name });
+      }
+    }
     renderPreviews();
   }
+  
   function renderPreviews() {
     const c = document.getElementById('mediaPreviews');
     c.innerHTML = '';
     pendingMedia.forEach((m, i) => {
       const div = document.createElement('div');
       div.className = 'media-thumb';
+      const sizeInfo = m.file.size > 1024 * 1024 ? (m.file.size / (1024 * 1024)).toFixed(1) + 'MB' : (m.file.size / 1024).toFixed(0) + 'KB';
       div.innerHTML = (m.type === 'video'
         ? `<video src="${m.url}" muted playsinline></video><span class="video-badge">▶ video</span>`
         : `<img src="${m.url}" alt="">`)
-        + `<button class="rm-media" onclick="removeMedia(${i})">×</button>`;
+        + `<button class="rm-media" onclick="removeMedia(${i})">×</button>`
+        + `<div class="compression-status">${sizeInfo}</div>`;
       c.appendChild(div);
     });
   }
@@ -572,7 +649,7 @@
       const show = data[0];
       const uploadedPaths = [];
       for (const m of pendingMedia) {
-        const ext = m.file.type === 'video/quicktime' ? 'mp4' : m.file.name.split('.').pop();
+        const ext = m.file.type === 'video/quicktime' || m.file.type === 'video/mp4' ? 'mp4' : m.file.name.split('.').pop();
         const path = `${currentUser.id}/${show.id}/${Date.now()}.${ext}`;
         await storageUpload(path, m.file);
         uploadedPaths.push({ path, type: m.type });
