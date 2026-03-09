@@ -318,6 +318,11 @@
   const SUPABASE_KEY = 'sb_publishable_QC1sjJOYPzmUGowuP-AhOw_yzOIQwNm';
   const BUCKET = 'show-media';
   const CLOUDINARY_CLOUD = 'dme1hasa1';
+  
+  // Mux Configuration
+  const MUX_TOKEN_ID = '227a3bc8-042f-4a61-a2e0-8c4ce0be09e1';
+  const MUX_TOKEN_SECRET = 'kYcyD2Wb4VUP9+J384jpyLcy47qGW+D9oVfFKdgzuDgR5H3ABWKhsCx1SeoXzpSMS29xpVwzTL+';
+  const MUX_AUTH = btoa(`${MUX_TOKEN_ID}:${MUX_TOKEN_SECRET}`);
 
   let currentUser = null;
   let accessToken = null;
@@ -499,49 +504,100 @@
     c.appendChild(row);
   }
 
-  // ─── CLOUDINARY CHUNKED UPLOAD ──────────────────────────────
-  const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
-  
-  async function uploadChunkedToCloudinary(file) {
-    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+  // ─── MUX UPLOAD ─────────────────────────────────────────────
+  async function uploadToMux(file) {
+    const sizeInMB = (file.size / (1024 * 1024)).toFixed(1);
+    showToast(`Uploading to Mux: "${file.name}" (${sizeInMB}MB)... This may take a minute.`);
     
     try {
-      for (let i = 0; i < totalChunks; i++) {
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, file.size);
-        const chunk = file.slice(start, end);
-        
-        const formData = new FormData();
-        formData.append('file', chunk);
-        formData.append('upload_preset', 'afterset_unsigned');
-        
-        // For chunked uploads, add chunk info
-        if (totalChunks > 1) {
-          formData.append('chunk', i);
-          formData.append('chunks', totalChunks);
-        }
-        
-        const progress = Math.round(((i + 1) / totalChunks) * 100);
-        showToast(`Uploading "${file.name}"... ${progress}%`);
-        
-        try {
-          const response = await axios.post(
-            `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD}/auto/upload`,
-            formData,
-            { timeout: 300000 } // 5 min timeout per chunk
-          );
-          
-          if (i === totalChunks - 1) {
-            // Last chunk - return the upload info
-            return response.data;
+      // Step 1: Create an upload URL with Mux
+      const uploadResponse = await axios.post(
+        'https://api.mux.com/video/v1/uploads',
+        { cors_origin: 'https://afterset-kappa.vercel.app' },
+        {
+          auth: {
+            username: MUX_TOKEN_ID,
+            password: MUX_TOKEN_SECRET
           }
-        } catch (chunkErr) {
-          console.error(`Chunk ${i + 1} failed:`, chunkErr);
-          throw chunkErr;
         }
+      );
+      
+      const uploadUrl = uploadResponse.data.data.url;
+      const uploadId = uploadResponse.data.data.id;
+      
+      // Step 2: Upload the file to the URL
+      showToast(`Uploading file... This may take a few minutes for large videos.`);
+      
+      await axios.put(uploadUrl, file, {
+        headers: {
+          'Content-Type': file.type || 'application/octet-stream'
+        },
+        timeout: 600000 // 10 minutes
+      });
+      
+      // Step 3: Complete the upload
+      const completeResponse = await axios.post(
+        `https://api.mux.com/video/v1/uploads/${uploadId}/complete`,
+        {},
+        {
+          auth: {
+            username: MUX_TOKEN_ID,
+            password: MUX_TOKEN_SECRET
+          }
+        }
+      );
+      
+      const assetId = completeResponse.data.data.asset_id;
+      
+      // Step 4: Wait for the asset to be ready and get playback info
+      let asset = null;
+      let attempts = 0;
+      const maxAttempts = 60; // Wait up to 60 seconds
+      
+      while (attempts < maxAttempts) {
+        const assetResponse = await axios.get(
+          `https://api.mux.com/video/v1/assets/${assetId}`,
+          {
+            auth: {
+              username: MUX_TOKEN_ID,
+              password: MUX_TOKEN_SECRET
+            }
+          }
+        );
+        
+        asset = assetResponse.data.data;
+        
+        if (asset.status === 'ready' && asset.playback_ids && asset.playback_ids.length > 0) {
+          break;
+        }
+        
+        attempts++;
+        showToast(`Processing video... ${Math.round((attempts / maxAttempts) * 100)}%`);
+        
+        // Wait 1 second before checking again
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
+      
+      if (!asset || asset.status !== 'ready') {
+        throw new Error('Video processing timed out. Please check Mux dashboard.');
+      }
+      
+      // Get the playback URL
+      const playbackId = asset.playback_ids[0].id;
+      const playbackUrl = `https://image.mux.com/${playbackId}/thumbnail.jpg`;
+      
+      return {
+        assetId: assetId,
+        playbackId: playbackId,
+        playbackUrl: playbackUrl,
+        type: 'video'
+      };
+      
     } catch (error) {
-      console.error('Cloudinary chunked upload error:', error);
+      console.error('Mux upload error:', error);
+      if (error.response?.data) {
+        console.error('Mux error details:', error.response.data);
+      }
       throw error;
     }
   }
@@ -557,25 +613,40 @@
     for (const f of files) {
       if (!f.type.startsWith('image/') && !f.type.startsWith('video/') && !f.name.toLowerCase().endsWith('.mov')) continue;
       
-      const sizeInMB = (f.size / (1024 * 1024)).toFixed(1);
-      showToast(`Starting upload of "${f.name}" (${sizeInMB}MB)...`);
+      const isVideo = f.type.startsWith('video/') || f.name.toLowerCase().endsWith('.mov');
       
       try {
-        const cloudinaryData = await uploadChunkedToCloudinary(f);
-        const type = cloudinaryData.resource_type === 'video' ? 'video' : 'image';
-        
-        pendingMedia.push({
-          file: { name: f.name },
-          url: cloudinaryData.secure_url,
-          type: type,
-          cloudinaryId: cloudinaryData.public_id
-        });
+        if (isVideo) {
+          // Upload video to Mux
+          const muxData = await uploadToMux(f);
+          pendingMedia.push({
+            file: { name: f.name },
+            url: `https://stream.mux.com/${muxData.playbackId}.m3u8`,
+            thumbnailUrl: muxData.playbackUrl,
+            type: 'video',
+            muxAssetId: muxData.assetId,
+            muxPlaybackId: muxData.playbackId
+          });
+        } else {
+          // For images, read as data URL
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            pendingMedia.push({
+              file: { name: f.name },
+              url: e.target.result,
+              type: 'image'
+            });
+            renderPreviews();
+          };
+          reader.readAsDataURL(f);
+          continue;
+        }
         
         renderPreviews();
         showToast(`"${f.name}" uploaded successfully! 🎉`);
       } catch (err) {
         console.error('Upload failed:', err);
-        showToast(`Failed to upload "${f.name}". Try again or use a smaller file.`, true);
+        showToast(`Failed to upload "${f.name}". Check your internet and try again.`, true);
       }
     }
   }
@@ -629,9 +700,11 @@
       
       // Format media for Supabase JSONB
       const media = pendingMedia.map(m => ({
-        cloudinaryId: m.cloudinaryId,
         type: m.type,
         url: m.url,
+        thumbnailUrl: m.thumbnailUrl || null,
+        muxAssetId: m.muxAssetId || null,
+        muxPlaybackId: m.muxPlaybackId || null,
         name: m.file.name
       }));
       
@@ -703,10 +776,15 @@
       const first = media[0];
       let thumb = `<div class="card-thumb">🎤</div>`;
       if (first) {
-        const url = first.url;
-        thumb = first.type === 'video'
-          ? `<div class="card-thumb"><video src="${url}" muted></video></div>`
-          : `<div class="card-thumb"><img src="${url}" alt=""></div>`;
+        if (first.type === 'video') {
+          // Use thumbnail for videos, or use mux image
+          const thumbUrl = first.thumbnailUrl || (first.muxPlaybackId ? `https://image.mux.com/${first.muxPlaybackId}/thumbnail.jpg` : null);
+          if (thumbUrl) {
+            thumb = `<div class="card-thumb"><img src="${thumbUrl}" alt=""></div>`;
+          }
+        } else {
+          thumb = `<div class="card-thumb"><img src="${first.url}" alt=""></div>`;
+        }
       }
       const stars = s.rating ? '★'.repeat(s.rating) + '☆'.repeat(5 - s.rating) : '';
       const card = document.createElement('div');
@@ -736,10 +814,15 @@
       <p class="section-title">Photos & Videos (${media.length})</p>
       <div class="media-grid">
         ${media.map((m, i) => {
-          const url = m.url;
-          return m.type === 'video'
-            ? `<div class="media-item" onclick="openLightbox('${id}',${i})"><video src="${url}" muted></video><div class="play-icon">▶</div></div>`
-            : `<div class="media-item" onclick="openLightbox('${id}',${i})"><img src="${url}" alt=""></div>`;
+          if (m.type === 'video') {
+            const thumbUrl = m.thumbnailUrl || (m.muxPlaybackId ? `https://image.mux.com/${m.muxPlaybackId}/thumbnail.jpg` : null);
+            return `<div class="media-item" onclick="openLightbox('${id}',${i})">
+              ${thumbUrl ? `<img src="${thumbUrl}" alt="">` : `<div style="background:#222;width:100%;height:100%;"></div>`}
+              <div class="play-icon">▶</div>
+            </div>`;
+          } else {
+            return `<div class="media-item" onclick="openLightbox('${id}',${i})"><img src="${m.url}" alt=""></div>`;
+          }
         }).join('')}
       </div>` : '<p class="section-title" style="margin-top:1.5rem;">No media uploaded</p>';
     document.getElementById('detailContent').innerHTML = `
@@ -783,10 +866,18 @@
   function openLightbox(showId, idx) {
     const s = shows.find(x => x.id === showId);
     const m = s.media[idx];
-    const url = m.url;
-    document.getElementById('lightboxContent').innerHTML = m.type === 'video'
-      ? `<video src="${url}" controls autoplay style="max-width:90vw;max-height:90vh;border-radius:8px;"></video>`
-      : `<img src="${url}" alt="" style="max-width:90vw;max-height:90vh;border-radius:8px;">`;
+    
+    if (m.type === 'video') {
+      // Use Mux HLS URL for streaming video
+      document.getElementById('lightboxContent').innerHTML = `
+        <video controls autoplay style="max-width:90vw;max-height:90vh;border-radius:8px;">
+          <source src="${m.url}" type="application/x-mpegURL">
+          Your browser does not support HLS video playback.
+        </video>`;
+    } else {
+      document.getElementById('lightboxContent').innerHTML = `<img src="${m.url}" alt="" style="max-width:90vw;max-height:90vh;border-radius:8px;">`;
+    }
+    
     document.getElementById('lightbox').classList.add('open');
   }
   function closeLightbox() {
